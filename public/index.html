@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<meta name="theme-color" content="#0b1120" />
+<title>Beacon — family location sharing</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="./style.css" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='6' fill='%2338bdf8'/%3E%3Ccircle cx='16' cy='16' r='12' fill='none' stroke='%2338bdf8' stroke-opacity='.5' stroke-width='2'/%3E%3C/svg%3E" />
+</head>
+<body>
+
+<!-- ------------------------------ app view ------------------------------ -->
+<section id="app">
+  <div id="sharing-banner" class="banner" hidden>
+    <span class="pulse"></span>
+    <div class="banner-text">
+      <strong>Your location is being shared</strong>
+      <span id="banner-detail" class="muted small"></span>
+    </div>
+    <button id="stop-sharing" class="btn danger small-btn">Stop</button>
+  </div>
+
+  <div id="sos-banner" class="banner sos" hidden>
+    <div class="banner-text">
+      <strong id="sos-title">Emergency alert</strong>
+      <span id="sos-detail" class="small"></span>
+    </div>
+    <button id="sos-ack" class="btn light small-btn">I'm on it</button>
+    <button id="sos-close" class="btn ghost small-btn">Dismiss</button>
+  </div>
+
+  <main class="layout">
+    <aside id="sidebar" class="sidebar">
+      <header class="side-head">
+        <div class="brand small-brand"><span class="brand-dot"></span> Beacon</div>
+        <button id="menu-btn" class="btn ghost icon" aria-label="Menu">&#9776;</button>
+      </header>
+
+      <section class="panel">
+        <h2>Circles</h2>
+        <div id="circle-list" class="list"></div>
+        <form id="circle-form" class="inline-form">
+          <input id="circle-name" type="text" maxlength="40" placeholder="New circle name" required />
+          <button class="btn small-btn" type="submit">Create</button>
+        </form>
+        <p class="muted small">A circle is a group, like &ldquo;Rivera family&rdquo; or &ldquo;Night shift&rdquo;.</p>
+      </section>
+
+      <section class="panel">
+        <h2>My sharing</h2>
+        <label class="switch-row">
+          <input id="sharing-toggle" type="checkbox" />
+          <span>
+            <strong>Share my location</strong>
+            <span class="muted small block">Off by default. Required before anyone can see you.</span>
+          </span>
+        </label>
+
+        <fieldset id="mode-fieldset" class="modes" disabled>
+          <legend class="muted small">Positioning method</legend>
+          <label><input type="radio" name="mode" value="gps" /> <strong>GPS</strong> <span class="muted small">Most accurate, needs sky view</span></label>
+          <label><input type="radio" name="mode" value="network" /> <strong>Cell tower / WiFi</strong> <span class="muted small">Coarse, works indoors and in a car</span></label>
+        </fieldset>
+
+        <fieldset id="share-targets" class="modes" disabled>
+          <legend class="muted small">Share with</legend>
+          <div id="target-list"></div>
+          <p id="target-empty" class="muted small" hidden>Create or join a circle first.</p>
+        </fieldset>
+
+        <div id="viewer-note" class="note" hidden></div>
+      </section>
+
+      <section class="panel">
+        <h2>Members</h2>
+        <div id="member-list" class="list"></div>
+        <form id="invite-form" class="inline-form">
+          <input id="invite-email" type="email" placeholder="Add by email" required />
+          <button class="btn small-btn" type="submit">Add</button>
+        </form>
+        <div id="invite-link-row" style="margin-top:10px; display:flex; gap:7px; align-items:center; flex-wrap:wrap;">
+          <button id="invite-link-btn" class="btn small-btn">🔗 Get invite link</button>
+          <input id="invite-link-input" type="text" readonly placeholder="Link will appear here…" style="flex:1; font-size:12px; min-width:0;" hidden />
+          <button id="invite-link-copy" class="btn small-btn" hidden>Copy</button>
+        </div>
+        <p class="muted small" style="margin-top:6px;">Share this link with anyone — they open it on their phone and tap Share My Location to be visible to you.</p>
+      </section>
+
+      <section class="panel">
+        <h2>Profile</h2>
+        <form id="profile-name-form" class="inline-form">
+          <input id="display-name-input" type="text" maxlength="40" placeholder="Your name" required />
+          <button class="btn small-btn" type="submit">Save</button>
+        </form>
+        <div id="me-line" class="muted small" style="margin-top: 8px;"></div>
+        <button id="reset-user" class="btn ghost block small-btn" style="margin-top: 10px;">New Identity / Reset</button>
+      </section>
+    </aside>
+
+    <div class="map-wrap">
+      <div id="map"></div>
+
+      <div class="map-controls">
+        <label class="chip">
+          <input id="trail-toggle" type="checkbox" checked />
+          <span>Trail</span>
+        </label>
+        <select id="hours-select" class="chip-select" title="Trail window">
+          <option value="1">1 hour</option>
+          <option value="6" selected>6 hours</option>
+          <option value="24">24 hours</option>
+        </select>
+        <select id="follow-select" class="chip-select" title="Follow">
+          <option value="">Free pan</option>
+          <option value="me" selected>Follow me</option>
+        </select>
+        <button id="recenter" class="btn small-btn">Recenter</button>
+      </div>
+
+      <button id="sos-btn" class="sos-btn" title="Send emergency alert">SOS</button>
+
+      <div id="gps-state" class="gps-state"></div>
+    </div>
+  </main>
+</section>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="./app.js"></script>
+</body>
+</html>
