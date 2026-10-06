@@ -343,7 +343,7 @@ input:focus-visible, button:focus-visible, select:focus-visible {
 .sos-btn {
   position: absolute;
   right: 16px;
-  bottom: 20px;
+  bottom: 36px;
   z-index: 600;
   width: 64px;
   height: 64px;
@@ -458,17 +458,25 @@ input:focus-visible, button:focus-visible, select:focus-visible {
   z-index: 1000;
   font-size: 14px;
   font-weight: 500;
-  max-width: 90vw;
+  max-width: min(90vw, 460px);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
   backdrop-filter: blur(12px);
-  white-space: nowrap;
+  text-align: center;
 }
 
 .toast.err { border-color: var(--danger); color: #fecdd3; }
 
-/* -------------------------------- mobile --------------------------------- */
+/* ------------------------------- responsive ------------------------------ */
 
-@media (max-width: 780px) {
+/*
+ * SIDEBAR_OVERLAY_QUERY — duplicated verbatim in app.js, because the JS needs
+ * to know whether the sidebar is a drawer (scrim, auto-close) or a column.
+ * Change it here, change it there.
+ *
+ * A phone on its side is wide but only ~400px tall, so the sidebar becomes a
+ * drawer there too instead of eating half the map.
+ */
+@media (max-width: 780px), (max-height: 520px) and (max-width: 1024px) {
   #menu-btn { display: inline-block; }
   .sidebar {
     position: absolute;
@@ -485,23 +493,80 @@ input:focus-visible, button:focus-visible, select:focus-visible {
   .sidebar.open { transform: translateX(0); }
   .sidebar-scrim { display: block; }
   .sos-btn { width: 58px; height: 58px; font-size: 15px; }
-  .map-controls {
-    right: 12px;
-    max-width: calc(100% - 24px);
+
+  /* The drawer button must live outside the drawer (it is a sibling, not a
+     child) or it slides off-screen along with it. */
+  #menu-btn {
+    display: inline-flex;
+    position: absolute;
+    left: 12px;
+    top: 12px;
+    z-index: 850;
+    background: rgba(9, 16, 32, 0.9);
+    border: 1px solid var(--line);
+    backdrop-filter: blur(10px);
   }
-  .toast { white-space: normal; text-align: center; }
+  /* While the drawer is open, tapping the scrim closes it. */
+  .sidebar.open ~ #menu-btn { display: none; }
+
+  /* Keep the toolbar clear of the menu button in the top-left corner. */
+  .map-controls { max-width: calc(100% - 72px); }
+  /* Leaflet's zoom control sits top-left; drop it below the drawer button. */
+  .leaflet-top.leaflet-left .leaflet-control-zoom { margin-top: 46px; }
 }
+
+/* Author styles outrank the UA's [hidden] rule, so hide it explicitly —
+   otherwise the scrim would sit over the map on every phone. */
+.sidebar-scrim[hidden] { display: none; }
 
 /* Short landscape windows: the banners alone can eat the whole viewport. */
 @media (max-height: 520px) {
   .banner { padding: 6px 12px; font-size: 13px; }
   .banner-text strong { font-size: 13px; }
   .panel { padding: 12px; }
-  .sos-btn { width: 52px; height: 52px; font-size: 14px; bottom: 12px; right: 12px; }
+  .sos-btn { width: 52px; height: 52px; font-size: 14px; bottom: 34px; right: 12px; }
   .gps-state { max-width: calc(100% - 90px); }
 }
 
-/* Shortcuts were sized for a mouse; touch needs bigger targets. */
+/* Small phones: one horizontally scrollable control row instead of three
+   wrapped rows covering the map. */
+@media (max-width: 560px) {
+  .map-controls {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 3px;
+  }
+  .map-controls::-webkit-scrollbar { display: none; }
+  .map-controls > * { flex: none; }
+}
+
+@media (max-width: 480px) {
+  .chip, .chip-select { padding: 6px 10px; font-size: 12.5px; }
+  .sos-btn { width: 54px; height: 54px; font-size: 14px; right: 12px; bottom: 46px; }
+  .gps-state { max-width: calc(100% - 84px); font-size: 11.5px; }
+  .banner { gap: 8px; padding: 8px 10px; }
+  .panel { padding: 14px; }
+  .toast { font-size: 13px; }
+  /* Two-line attribution would reach up into the SOS button. */
+  .leaflet-control-attribution {
+    font-size: 10px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: calc(100vw - 96px);
+  }
+}
+
+/* Desk-wide: more room for the panels without starving the map. */
+@media (min-width: 1440px) {
+  .sidebar { width: clamp(300px, 22vw, 400px); }
+  .panel { padding: 18px; }
+}
+
+/* Shortcuts were sized for a mouse; touch needs bigger targets. Kept last so
+   it wins over the compact phone padding above. */
 @media (pointer: coarse) {
   .btn.small-btn, .chip, .chip-select { padding: 10px 13px; }
   .leaflet-touch .leaflet-bar a { width: 34px; height: 34px; line-height: 32px; }
@@ -513,8 +578,9 @@ input:focus-visible, button:focus-visible, select:focus-visible {
 
 /* Respect the notch and home indicator on phones. */
 @supports (padding: max(0px)) {
+  #menu-btn { top: calc(12px + env(safe-area-inset-top, 0px)); }
   .map-controls { top: calc(12px + env(safe-area-inset-top, 0px)); }
-  .sos-btn { bottom: calc(20px + env(safe-area-inset-bottom, 0px)); }
+  .sos-btn { bottom: calc(36px + env(safe-area-inset-bottom, 0px)); }
   .gps-state { bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }
   .toast { bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }
 }

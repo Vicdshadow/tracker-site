@@ -40,6 +40,13 @@ const state = {
 
 let map = null;
 
+// Must stay identical to the media query in style.css (SIDEBAR_OVERLAY_QUERY):
+// the sidebar is a drawer there, so the scrim and auto-close rules follow it.
+const SIDEBAR_OVERLAY_QUERY = '(max-width: 780px), (max-height: 520px) and (max-width: 1024px)';
+const sidebarOverlay = window.matchMedia
+  ? window.matchMedia(SIDEBAR_OVERLAY_QUERY)
+  : { matches: window.innerWidth <= 780 };
+
 /* -------------------------------- helpers -------------------------------- */
 
 async function api(path, options = {}) {
@@ -709,7 +716,7 @@ function selectCircle(id) {
   renderCircles();
   renderMembers();
   renderSharing();
-  if (window.innerWidth <= 780) setSidebar(false);
+  if (sidebarOverlay.matches) setSidebar(false);
 }
 
 /* -------------------------------- members -------------------------------- */
@@ -1152,7 +1159,7 @@ function setSidebar(open) {
   sidebar.classList.toggle('open', open);
   if (menuBtn) menuBtn.setAttribute('aria-expanded', String(open));
   const scrim = el('sidebar-scrim');
-  if (scrim) scrim.hidden = !open || window.innerWidth > 780;
+  if (scrim) scrim.hidden = !open || !sidebarOverlay.matches;
   syncMapSize();
 }
 if (menuBtn) {
@@ -1166,7 +1173,8 @@ document.addEventListener('keydown', (e) => {
 });
 // A circle chosen on a narrow screen should hand the map back to the user.
 window.addEventListener('resize', () => {
-  if (window.innerWidth > 780) setSidebar(false);
+  if (!sidebarOverlay.matches) setSidebar(false);
+  syncMapSize();
 });
 
 async function startApp(user, meData) {
