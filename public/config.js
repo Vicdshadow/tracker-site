@@ -4,5 +4,5 @@
 window.TRACKER_CONFIG = {
   // Absolute origin of the backend that serves /api/* and /ws.
   // Example: 'https://beacon-api.onrender.com'
-  apiBase: '',
+  apiBase: 'https://tracker-api-vly1.onrender.com',
 };
