@@ -186,16 +186,17 @@ function mapNotice(html, action) {
   box.appendChild(btn);
 }
 
-// Three free, keyless basemaps tried in order. Only the first one needs a
-// {r} retina token; the other two 404 on "@2x" paths.
+// Three free, keyless basemaps tried in order. CARTO was dropped: it now
+// serves a static "API key is required" image instead of tiles.
 const BASEMAP_SOURCES = [
   {
-    url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+    // Dark, matches the UI. Native tiles stop at z16; beyond that Leaflet
+    // scales the z16 tiles up rather than going blank.
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
     opts: {
-      subdomains: 'abcd',
       maxZoom: 19,
-      attribution:
-        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+      maxNativeZoom: 16,
+      attribution: '&copy; Esri, TomTom, Garmin, Foursquare, METI/NASA, USGS, EPA, NOAA',
     },
   },
   {
@@ -207,11 +208,10 @@ const BASEMAP_SOURCES = [
     },
   },
   {
-    url: 'https://maps.wikimedia.org/osm-intl/{z}/{x}/{y}.png',
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
     opts: {
       maxZoom: 19,
-      attribution:
-        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; Wikimedia',
+      attribution: '&copy; Esri &mdash; Source: Esri, HERE, Garmin, FAO, NOAA, USGS, OpenStreetMap contributors',
     },
   },
 ];
