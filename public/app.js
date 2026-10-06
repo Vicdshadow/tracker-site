@@ -186,21 +186,13 @@ function mapNotice(html, action) {
   box.appendChild(btn);
 }
 
-// Free, keyless basemaps cycled by the map control. Street detail first:
-// OSM draws every street name down to z19, so you can read the road you are
-// standing on. Esri sources are kept as fallbacks in case OSM is blocked.
+// Free, keyless basemaps cycled by the map control. All three come from
+// Esri's public tile service: tile.openstreetmap.org blocked this site for
+// breaking its volunteer-server usage policy, so OSM tiles are gone.
+// Street detail first, so you can read the road you are standing on.
 const BASEMAP_SOURCES = [
   {
     label: 'Streets',
-    url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-    opts: {
-      maxZoom: 19,
-      attribution:
-        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-    },
-  },
-  {
-    label: 'World',
     url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
     opts: {
       maxZoom: 19,
@@ -218,6 +210,14 @@ const BASEMAP_SOURCES = [
       attribution: '&copy; Esri, TomTom, Garmin, Foursquare, METI/NASA, USGS, EPA, NOAA',
     },
   },
+  {
+    label: 'Satellite',
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    opts: {
+      maxZoom: 19,
+      attribution: '&copy; Esri, Maxar, Earthstar Geographics and the GIS User Community',
+    },
+  },
 ];
 const BASEMAP_KEY = 'tracker.basemapIndex';
 let basemapLayer = null;
@@ -229,8 +229,8 @@ function updateBasemapButton() {
   if (btn) btn.textContent = BASEMAP_SOURCES[basemapIndex].label;
 }
 
-// Cycles Streets -> World -> Dark so street names can be swapped for a
-// plainer view (or vice versa) without reloading the page.
+// Cycles Streets -> Dark -> Satellite so street detail can be swapped for a
+// plainer or photographic view without reloading the page.
 function cycleBasemap() {
   basemapIndex = (basemapIndex + 1) % BASEMAP_SOURCES.length;
   localStorage.setItem(BASEMAP_KEY, String(basemapIndex));
