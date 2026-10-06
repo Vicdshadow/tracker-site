@@ -1,5 +1,19 @@
 const el = (id) => document.getElementById(id);
 const TOKEN_KEY = 'beacon.token';
+const API_BASE_KEY = 'beacon.apiBase';
+
+// Empty means "same origin as this page". config.js wins on deploys; the
+// localStorage override is for pointing a local build at a remote backend.
+const API_BASE = String(
+  localStorage.getItem(API_BASE_KEY) || window.TRACKER_CONFIG?.apiBase || ''
+).trim().replace(/\/+$/, '');
+
+function wsEndpoint(token) {
+  const url = new URL(API_BASE || location.origin, location.href);
+  const proto = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  const base = url.pathname.replace(/\/+$/, '');
+  return `${proto}//${url.host}${base}/ws?token=${encodeURIComponent(token)}`;
+}
 
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || null,
@@ -21,6 +35,7 @@ const state = {
   mode: 'gps',
   pendingAlert: null,
   isLocal: false,
+  wsStatus: 'connecting',
 };
 
 let map = null;
@@ -28,7 +43,7 @@ let map = null;
 /* -------------------------------- helpers -------------------------------- */
 
 async function api(path, options = {}) {
-  const res = await fetch(path, {
+  const res = await fetch(API_BASE + path, {
     ...options,
     headers: {
       ...(options.body ? { 'content-type': 'application/json' } : {}),
@@ -149,15 +164,86 @@ if (resetBtn) {
 
 /* ---------------------------------- map ---------------------------------- */
 
+function mapNotice(html) {
+  const box = el('map-notice');
+  if (!box) return;
+  box.innerHTML = html;
+  box.hidden = !html;
+}
+
 function ensureMap() {
   if (map) return map;
+  if (typeof L === 'undefined') {
+    mapNotice('<strong>Map failed to load</strong>The map library did not load. Press Ctrl+Shift+R to force a refresh.');
+    return null;
+  }
   map = L.map('map').setView([20, 0], 2);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19,
-    attribution: '&copy; OpenStreetMap',
-  }).addTo(map);
-  requestAnimationFrame(() => map.invalidateSize());
+
+  // Two keyless basemaps in a row: CARTO dark, then plain OpenStreetMap.
+  // If both are blocked (ad-blocker, offline, captive portal) say so instead
+  // of leaving an empty dark rectangle.
+  const sources = [
+    {
+      url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+      opts: {
+        subdomains: 'abcd',
+        maxZoom: 19,
+        attribution:
+          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+      },
+    },
+    {
+      url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+      opts: {
+        maxZoom: 19,
+        attribution:
+          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+      },
+    },
+  ];
+  let sourceIndex = 0;
+  let tileErrors = 0;
+  const layer = L.tileLayer(sources[0].url, sources[0].opts);
+  layer.on('tileerror', () => {
+    tileErrors += 1;
+    if (tileErrors < 3) return;
+    if (sourceIndex < sources.length - 1) {
+      sourceIndex += 1;
+      tileErrors = 0;
+      map.removeLayer(layer);
+      const next = L.tileLayer(sources[sourceIndex].url, sources[sourceIndex].opts);
+      next.on('tileerror', () => {
+        mapNotice('<strong>Map tiles are not loading</strong>Check your connection, or a browser extension may be blocking map tiles. No API key is needed for this map.');
+      });
+      next.addTo(map);
+      return;
+    }
+    mapNotice('<strong>Map tiles are not loading</strong>Check your connection, or a browser extension may be blocking map tiles. No API key is needed for this map.');
+  });
+  layer.addTo(map);
+
+  syncMapSize();
+  // Leaflet caches container dimensions, so a resize or orientation change
+  // leaves grey gaps until it is told to re-measure.
+  if ('ResizeObserver' in window) {
+    new ResizeObserver(() => syncMapSize()).observe(el('map'));
+  }
+  window.addEventListener('resize', syncMapSize);
+  window.addEventListener('orientationchange', () => setTimeout(syncMapSize, 250));
   return map;
+}
+
+let mapSizeQueued = false;
+function syncMapSize() {
+  if (!map || mapSizeQueued) return;
+  mapSizeQueued = true;
+  requestAnimationFrame(() => {
+    mapSizeQueued = false;
+    if (!map) return;
+    const center = map.getCenter();
+    map.invalidateSize({ animate: false });
+    map.setView(center, map.getZoom(), { animate: false });
+  });
 }
 
 function markerIcon(color, isMe) {
@@ -202,6 +288,7 @@ function popupHtml(userId, point) {
 
 function placeMarker(userId, point) {
   const m = ensureMap();
+  if (!m) return null;
   const isMe = !!state.me && userId === state.me.id;
   const color = userColor(userId);
   let entry = state.markers.get(userId);
@@ -230,7 +317,18 @@ function placeMarker(userId, point) {
   entry.marker.setPopupContent(popupHtml(userId, point));
   if (!isMe) state.live.set(userId, point);
   if (isMe && el('follow-select').value === 'me') m.panTo(entry.target);
+  scheduleFit();
   return entry;
+}
+
+let fitTimer = null;
+// Positions arrive one message at a time, so fit after the burst settles.
+function scheduleFit() {
+  if (fitTimer) clearTimeout(fitTimer);
+  fitTimer = setTimeout(() => {
+    fitTimer = null;
+    if (state.markers.size && el('follow-select').value !== 'me') fitMembers();
+  }, 500);
 }
 
 function removeMarker(userId) {
@@ -270,7 +368,7 @@ function pushPoint(userId, point) {
 }
 
 function drawTrails() {
-  ensureMap();
+  if (!ensureMap()) return;
   if (!el('trail-toggle').checked) {
     for (const line of state.lines.values()) line.remove();
     state.lines.clear();
@@ -330,12 +428,33 @@ el('hours-select').addEventListener('change', () => {
 el('follow-select').addEventListener('change', () => {
   if (el('follow-select').value !== 'me') return;
   const entry = state.me && state.markers.get(state.me.id);
-  if (entry) ensureMap().setView(entry.target, Math.max(ensureMap().getZoom(), 14));
+  const m = ensureMap();
+  if (entry && m) m.setView(entry.target, Math.max(m.getZoom(), 14));
 });
+
+function fitMembers() {
+  const m = ensureMap();
+  if (!m) return;
+  const points = [];
+  for (const [userId, entry] of state.markers) {
+    const me = state.me && userId === state.me.id;
+    if (me && el('follow-select').value === 'me') continue;
+    points.push(entry.target);
+  }
+  if (points.length === 1) {
+    m.setView(points[0], Math.max(m.getZoom(), 15));
+    return;
+  }
+  if (points.length > 1) m.fitBounds(L.latLngBounds(points), { padding: [48, 48], maxZoom: 16 });
+}
+
+el('fit-members').addEventListener('click', fitMembers);
 
 el('recenter').addEventListener('click', () => {
   const entry = state.me && state.markers.get(state.me.id);
-  if (entry) ensureMap().setView(entry.target, 15);
+  const m = ensureMap();
+  if (entry && m) m.setView(entry.target, 15);
+  else fitMembers();
 });
 
 /* ------------------------------- geolocation ------------------------------ */
@@ -555,6 +674,7 @@ function selectCircle(id) {
   renderCircles();
   renderMembers();
   renderSharing();
+  if (window.innerWidth <= 780) setSidebar(false);
 }
 
 /* -------------------------------- members -------------------------------- */
@@ -724,6 +844,19 @@ el('sos-close').addEventListener('click', () => {
 function renderCircles() {
   const list = el('circle-list');
   list.innerHTML = '';
+
+  // A silent dead socket looks identical to "nobody is sharing". Say which it is.
+  const status = document.createElement('p');
+  status.className = 'conn-state' + (state.wsStatus === 'live' ? ' ok' : '');
+  status.textContent = state.isLocal
+    ? 'Local demo mode — no server connection'
+    : state.wsStatus === 'live'
+      ? 'Connected'
+      : state.wsStatus === 'connecting'
+        ? 'Connecting…'
+        : 'Reconnecting — locations will not update';
+  list.appendChild(status);
+
   if (!state.circles.length) {
     list.innerHTML = '<p class="muted small">No circles yet. Create one to get started.</p>';
     el('member-list').innerHTML = '<p class="muted small">No circle selected.</p>';
@@ -761,11 +894,39 @@ function renderMembers() {
     const status = m.sharingEnabled
       ? (online ? 'Sharing now' : 'Sharing · offline')
       : 'Not sharing';
+    row.title = m.sharingEnabled ? '' : 'Turn sharing on on their device to see their position';
     row.innerHTML = `
       <span class="dot" style="background:${m.color}"></span>
       <span>${escapeHtml(m.name)}${isMe ? ' (you)' : ''}<span class="muted small block">${status}</span></span>
       <span class="meta muted small">${live ? ago(live.t) : '—'}</span>`;
     list.appendChild(row);
+  }
+
+  // Silence on an empty map is the most confusing failure mode, so say why.
+  const noPositions = [...state.markers.keys()].filter((id) => {
+    const m = circle.members.find((x) => x.id === id);
+    return m && !m.sharingEnabled;
+  });
+  if (!state.markers.size || noPositions.length) {
+    const parts = [];
+    if (!state.markers.size) parts.push('No one in this circle is sharing a position yet.');
+    else if (noPositions.length) {
+      parts.push(`${noPositions.length} member(s) have sharing turned off, so their position is hidden.`);
+    }
+    const note = document.createElement('p');
+    note.className = 'muted small';
+    note.style.marginTop = '8px';
+    note.textContent = parts.join(' ');
+    list.appendChild(note);
+  }
+}
+
+// Location traffic is the most reliable signal that a member is actually
+// sharing, so keep the circle summaries in step with it.
+function markSharing(userId, on) {
+  for (const c of state.circles) {
+    const m = c.members.find((x) => x.id === userId);
+    if (m) m.sharingEnabled = on;
   }
 }
 
@@ -802,13 +963,15 @@ function renderSharing() {
   if (me.sharingEnabled) el('banner-detail').textContent = bannerText();
 
   const note = el('viewer-note');
-  if (me.sharingEnabled) {
-    note.hidden = false;
-    note.textContent = state.viewers.length
-      ? `${state.viewers.length} person(s) can see your location right now.`
-      : 'Nobody is currently viewing your location.';
+  note.hidden = false;
+  if (state.viewers.length) {
+    note.textContent = `${state.viewers.length} person(s) can see your location right now.`;
+  } else if (me.sharingEnabled) {
+    note.textContent = 'Nobody is currently viewing your location.';
+  } else if (state.circles.length) {
+    note.textContent = 'You are not broadcasting, but you can still see everyone sharing in your circles.';
   } else {
-    note.hidden = true;
+    note.textContent = 'Create a circle to share or view locations.';
   }
 
   const displayEmail = (me.email || '').endsWith('@beacon.local') ? '(guest session)' : me.email;
@@ -836,12 +999,13 @@ setInterval(() => {
 
 function connectWs() {
   if (!state.token || state.isLocal) return;
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(state.token)}`);
+  const ws = new WebSocket(wsEndpoint(state.token));
   state.ws = ws;
 
   ws.addEventListener('open', () => {
     state.wsRetry = 0;
+    state.wsStatus = 'live';
+    renderCircles();
   });
 
   ws.addEventListener('message', (e) => {
@@ -862,14 +1026,15 @@ function connectWs() {
         break;
       }
 
-      case 'location': {
-        placeMarker(msg.userId, msg);
-        if (msg.userId !== state.me.id) {
-          pushPoint(msg.userId, msg);
-          renderMembers();
+case 'location': {
+          markSharing(msg.userId, true);
+          placeMarker(msg.userId, msg);
+          if (msg.userId !== state.me.id) {
+            pushPoint(msg.userId, msg);
+            renderMembers();
+          }
+          break;
         }
-        break;
-      }
 
       case 'trail': {
         state.live.set(msg.userId, msg.points[msg.points.length - 1]);
@@ -887,15 +1052,12 @@ function connectWs() {
         break;
       }
 
-      case 'sharing': {
-        for (const c of state.circles) {
-          const mem = c.members.find((m) => m.id === msg.user.id);
-          if (mem) mem.sharingEnabled = msg.user.sharingEnabled;
+case 'sharing': {
+          markSharing(msg.user.id, msg.user.sharingEnabled);
+          if (!msg.user.sharingEnabled) removeMarker(msg.user.id);
+          renderMembers();
+          break;
         }
-        if (!msg.user.sharingEnabled) removeMarker(msg.user.id);
-        renderMembers();
-        break;
-      }
 
       case 'viewers': {
         state.viewers = msg.ids;
@@ -937,6 +1099,8 @@ function connectWs() {
 
   ws.addEventListener('close', () => {
     if (!state.token) return;
+    state.wsStatus = 'offline';
+    renderCircles();
     state.wsRetry = Math.min(state.wsRetry + 1, 6);
     setTimeout(connectWs, 500 * 2 ** state.wsRetry);
   });
@@ -947,9 +1111,28 @@ function connectWs() {
 /* --------------------------------- boot ---------------------------------- */
 
 const menuBtn = el('menu-btn');
-if (menuBtn) {
-  menuBtn.addEventListener('click', () => el('sidebar').classList.toggle('open'));
+const sidebar = el('sidebar');
+function setSidebar(open) {
+  if (!sidebar) return;
+  sidebar.classList.toggle('open', open);
+  if (menuBtn) menuBtn.setAttribute('aria-expanded', String(open));
+  const scrim = el('sidebar-scrim');
+  if (scrim) scrim.hidden = !open || window.innerWidth > 780;
+  syncMapSize();
 }
+if (menuBtn) {
+  menuBtn.addEventListener('click', () => setSidebar(!sidebar.classList.contains('open')));
+}
+if (el('sidebar-scrim')) {
+  el('sidebar-scrim').addEventListener('click', () => setSidebar(false));
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') setSidebar(false);
+});
+// A circle chosen on a narrow screen should hand the map back to the user.
+window.addEventListener('resize', () => {
+  if (window.innerWidth > 780) setSidebar(false);
+});
 
 async function startApp(user, meData) {
   state.isLocal = false;
@@ -1042,7 +1225,7 @@ async function ensureUserSession() {
   }
 
   try {
-    const res = await fetch('/api/auth/guest', {
+    const res = await fetch(API_BASE + '/api/auth/guest', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name: localStorage.getItem('beacon.preferredName') || '' }),

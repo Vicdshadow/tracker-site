@@ -9,17 +9,44 @@ import { db, save, flush } from './store.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
+// Behind Render/Railway/Netlify proxies so req.protocol reflects X-Forwarded-Proto.
+app.set('trust proxy', true);
 const server = createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
 const PORT = process.env.PORT || 3000;
 const SESSION_TTL = 30 * 24 * 60 * 60 * 1000;
+
+// Comma-separated list of origins allowed to call this API, or '*' for any.
+// Needed when the static frontend is hosted separately from this server.
+const CORS_ORIGINS = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+// Public origin of the frontend, used to build invite links. Falls back to the
+// request host when unset.
+const PUBLIC_URL = (process.env.PUBLIC_URL || '').trim().replace(/\/+$/, '');
 const PING_MIN_GAP = 1000;
 const TRAIL_MAX_POINTS = 5000;
 const TRAIL_MAX_AGE = 7 * 24 * 60 * 60 * 1000;
 const SOS_MAX_KEEP = 100;
 const VIEWER_TTL = 90 * 1000;
 
+function cors(req, res, next) {
+  const origin = req.get('origin');
+  if (origin && (CORS_ORIGINS.includes('*') || CORS_ORIGINS.includes(origin))) {
+    res.set('Vary', 'Origin');
+    res.set('Access-Control-Allow-Origin', origin);
+    res.set('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
+    res.set('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+    res.set('Access-Control-Max-Age', '86400');
+  }
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+}
+
+app.use(cors);
 app.use(express.json({ limit: '32kb' }));
 app.use(express.static(path.join(root, 'public')));
 
@@ -97,14 +124,12 @@ function sharedCircleIds(userId) {
   return new Set((u.shareCircles || []).filter((cid) => isMember(circleById(cid), userId)));
 }
 
-function circlesVisibleTo(userId) {
-  return circlesOf(userId).filter((c) => sharedCircleIds(userId).has(c.id));
-}
-
 // Everyone who is allowed to see targetId's position right now.
+// Gating is per-target: the sharer must opt in, but the viewer does not have to.
 function watchersOf(targetId) {
   const ids = new Set();
-  for (const c of circlesVisibleTo(targetId)) {
+  for (const c of circlesOf(targetId)) {
+    if (!sharedCircleIds(targetId).has(c.id)) continue;
     for (const m of c.memberIds) if (m !== targetId) ids.add(m);
   }
   return ids;
@@ -192,7 +217,7 @@ wss.on('connection', (ws, req) => {
   const sock = { ws, userId: user.id, viewing: new Set(), subscribed: new Set() };
   sockets.add(sock);
 
-  const circles = circlesVisibleTo(user.id).map((c) => circleSummary(c));
+  const circles = circlesOf(user.id).map((c) => circleSummary(c));
   send(sock, 'hello', {
     me: publicUser(user),
     circles,
@@ -297,7 +322,7 @@ function circleSummary(c) {
 
 function liveSnapshotFor(userId) {
   const out = [];
-  for (const c of circlesVisibleTo(userId)) {
+  for (const c of circlesOf(userId)) {
     for (const memberId of c.memberIds) {
       if (memberId === userId) continue;
       if (!sharedCircleIds(memberId).has(c.id)) continue;
@@ -466,12 +491,17 @@ app.post('/api/circles/:id/invite-link', auth, (req, res) => {
   }
   db.invites[code] = { circleId: circle.id, createdBy: req.user.id, createdAt: now() };
   save();
-  let host = req.get('host');
-  if (host.startsWith('localhost') || host.startsWith('127.0.0.1')) {
-    const port = host.split(':')[1] || '3000';
-    host = `${getLocalIp()}:${port}`;
+  let baseUrl;
+  if (PUBLIC_URL) {
+    baseUrl = PUBLIC_URL;
+  } else {
+    let host = req.get('host');
+    if (host.startsWith('localhost') || host.startsWith('127.0.0.1')) {
+      const port = host.split(':')[1] || '3000';
+      host = `${getLocalIp()}:${port}`;
+    }
+    baseUrl = `${req.protocol}://${host}`;
   }
-  const baseUrl = `${req.protocol}://${host}`;
   res.json({ url: `${baseUrl}/?join=${code}`, code });
 });
 
@@ -579,7 +609,7 @@ app.get('/api/trails', auth, (req, res) => {
   const hours = Math.min(Math.max(Number(req.query.hours) || 6, 1), 24);
   const since = now() - hours * 3600 * 1000;
   const trails = {};
-  for (const c of circlesVisibleTo(req.user.id)) {
+  for (const c of circlesOf(req.user.id)) {
     for (const memberId of c.memberIds) {
       if (memberId === req.user.id) continue;
       if (!sharedCircleIds(memberId).has(c.id)) continue;

@@ -1,0 +1,26 @@
+# Netlify serves the static frontend only. The Express + WebSocket backend in
+# server.js must run somewhere that supports persistent sockets (Render, Railway,
+# Fly.io, a VPS). Point the frontend at it by editing public/config.js, and set
+# CORS_ORIGINS on the backend to this site's origin.
+
+[build]
+  publish = "public"
+  command = ""
+
+[build.environment]
+  NODE_VERSION = "18"
+
+# config.js holds the backend URL and is meant to be edited in the Netlify UI,
+# so it must not be cached aggressively.
+[[headers]]
+  for = "/config.js"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "no-referrer"
+    X-Frame-Options = "DENY"
+    Permissions-Policy = "geolocation=(self)"
