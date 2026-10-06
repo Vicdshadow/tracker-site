@@ -186,20 +186,12 @@ function mapNotice(html, action) {
   box.appendChild(btn);
 }
 
-// Three free, keyless basemaps tried in order. CARTO was dropped: it now
-// serves a static "API key is required" image instead of tiles.
+// Free, keyless basemaps cycled by the map control. Street detail first:
+// OSM draws every street name down to z19, so you can read the road you are
+// standing on. Esri sources are kept as fallbacks in case OSM is blocked.
 const BASEMAP_SOURCES = [
   {
-    // Dark, matches the UI. Native tiles stop at z16; beyond that Leaflet
-    // scales the z16 tiles up rather than going blank.
-    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
-    opts: {
-      maxZoom: 19,
-      maxNativeZoom: 16,
-      attribution: '&copy; Esri, TomTom, Garmin, Foursquare, METI/NASA, USGS, EPA, NOAA',
-    },
-  },
-  {
+    label: 'Streets',
     url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
     opts: {
       maxZoom: 19,
@@ -208,16 +200,44 @@ const BASEMAP_SOURCES = [
     },
   },
   {
+    label: 'World',
     url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
     opts: {
       maxZoom: 19,
       attribution: '&copy; Esri &mdash; Source: Esri, HERE, Garmin, FAO, NOAA, USGS, OpenStreetMap contributors',
     },
   },
+  {
+    // Dark, matches the UI. Native tiles stop at z16; beyond that Leaflet
+    // scales the z16 tiles up rather than going blank.
+    label: 'Dark',
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+    opts: {
+      maxZoom: 19,
+      maxNativeZoom: 16,
+      attribution: '&copy; Esri, TomTom, Garmin, Foursquare, METI/NASA, USGS, EPA, NOAA',
+    },
+  },
 ];
+const BASEMAP_KEY = 'tracker.basemapIndex';
 let basemapLayer = null;
-let basemapIndex = 0;
+let basemapIndex = Math.max(0, Math.min(BASEMAP_SOURCES.length - 1, Number(localStorage.getItem(BASEMAP_KEY)) || 0));
 let basemapErrors = 0;
+
+function updateBasemapButton() {
+  const btn = el('basemap-toggle');
+  if (btn) btn.textContent = BASEMAP_SOURCES[basemapIndex].label;
+}
+
+// Cycles Streets -> World -> Dark so street names can be swapped for a
+// plainer view (or vice versa) without reloading the page.
+function cycleBasemap() {
+  basemapIndex = (basemapIndex + 1) % BASEMAP_SOURCES.length;
+  localStorage.setItem(BASEMAP_KEY, String(basemapIndex));
+  updateBasemapButton();
+  mapNotice('');
+  loadBasemap();
+}
 
 function loadBasemap() {
   if (!map || typeof L === 'undefined') return;
@@ -299,6 +319,12 @@ function markerIcon(color, isMe) {
 
 function userColor(userId) {
   if (state.me && userId === state.me.id) return '#38bdf8';
+  // Prefer the circle being viewed so the map always matches the member list.
+  const selected = currentCircle();
+  if (selected) {
+    const mem = selected.members.find((x) => x.id === userId);
+    if (mem) return mem.color;
+  }
   for (const c of state.circles) {
     const mem = c.members.find((x) => x.id === userId);
     if (mem) return mem.color;
@@ -358,10 +384,21 @@ function placeMarker(userId, point) {
 
   entry.marker.setPopupContent(popupHtml(userId, point));
   if (!isMe) state.live.set(userId, point);
-  if (isMe && el('follow-select').value === 'me') m.panTo(entry.target);
+  if (isMe && el('follow-select').value === 'me') {
+    // A cold start lands on a world-wide view; frame your own pin at street
+    // level once, then only pan so pinching in/out still works.
+    if (!followFramed) {
+      m.setView(entry.target, 17, { animate: false });
+      followFramed = true;
+    } else {
+      m.panTo(entry.target);
+    }
+  }
   scheduleFit();
   return entry;
 }
+
+let followFramed = false;
 
 let fitTimer = null;
 // Positions arrive one message at a time, so fit after the burst settles.
@@ -468,10 +505,16 @@ el('hours-select').addEventListener('change', () => {
 });
 
 el('follow-select').addEventListener('change', () => {
-  if (el('follow-select').value !== 'me') return;
+  if (el('follow-select').value !== 'me') {
+    followFramed = false;
+    return;
+  }
   const entry = state.me && state.markers.get(state.me.id);
   const m = ensureMap();
-  if (entry && m) m.setView(entry.target, Math.max(m.getZoom(), 14));
+  if (entry && m) {
+    m.setView(entry.target, Math.max(m.getZoom(), 16));
+    followFramed = true;
+  }
 });
 
 function fitMembers() {
@@ -484,10 +527,10 @@ function fitMembers() {
     points.push(entry.target);
   }
   if (points.length === 1) {
-    m.setView(points[0], Math.max(m.getZoom(), 15));
+    m.setView(points[0], Math.max(m.getZoom(), 17));
     return;
   }
-  if (points.length > 1) m.fitBounds(L.latLngBounds(points), { padding: [48, 48], maxZoom: 16 });
+  if (points.length > 1) m.fitBounds(L.latLngBounds(points), { padding: [48, 48], maxZoom: 17 });
 }
 
 el('fit-members').addEventListener('click', fitMembers);
@@ -495,9 +538,12 @@ el('fit-members').addEventListener('click', fitMembers);
 el('recenter').addEventListener('click', () => {
   const entry = state.me && state.markers.get(state.me.id);
   const m = ensureMap();
-  if (entry && m) m.setView(entry.target, 15);
+  if (entry && m) m.setView(entry.target, 17);
   else fitMembers();
 });
+
+el('basemap-toggle').addEventListener('click', cycleBasemap);
+updateBasemapButton();
 
 /* ------------------------------- geolocation ------------------------------ */
 
@@ -716,7 +762,22 @@ function selectCircle(id) {
   renderCircles();
   renderMembers();
   renderSharing();
+  refreshColors();
   if (sidebarOverlay.matches) setSidebar(false);
+}
+
+// Colours are resolved per circle, so pins and trails are repainted whenever
+// the viewed circle changes.
+function refreshColors() {
+  for (const [userId, entry] of state.markers) {
+    const color = userColor(userId);
+    const isMe = !!state.me && userId === state.me.id;
+    if (entry.color !== color) {
+      entry.color = color;
+      entry.marker.setIcon(markerIcon(color, isMe));
+    }
+  }
+  drawTrails();
 }
 
 /* -------------------------------- members -------------------------------- */
@@ -938,7 +999,7 @@ function renderMembers() {
       : 'Not sharing';
     row.title = m.sharingEnabled ? '' : 'Turn sharing on on their device to see their position';
     row.innerHTML = `
-      <span class="dot" style="background:${m.color}"></span>
+      <span class="dot" style="background:${userColor(m.id)}"></span>
       <span>${escapeHtml(m.name)}${isMe ? ' (you)' : ''}<span class="muted small block">${status}</span></span>
       <span class="meta muted small">${live ? ago(live.t) : '—'}</span>`;
     list.appendChild(row);
@@ -1064,6 +1125,7 @@ function connectWs() {
         renderCircles();
         renderMembers();
         renderSharing();
+        refreshColors();
         if (state.selectedCircle) selectCircle(state.selectedCircle);
         break;
       }
@@ -1112,6 +1174,7 @@ case 'sharing': {
         renderCircles();
         renderMembers();
         renderSharing();
+        refreshColors();
         break;
       }
 

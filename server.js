@@ -304,6 +304,7 @@ wss.on('connection', (ws, req) => {
 /* --------------------------------- data --------------------------------- */
 
 function circleSummary(c) {
+  const taken = new Set();
   return {
     id: c.id,
     name: c.name,
@@ -311,13 +312,15 @@ function circleSummary(c) {
     memberIds: c.memberIds,
     members: c.memberIds.map((id) => {
       const u = getUser(id);
-      return {
-        id,
-        name: u ? u.name : 'Unknown',
-        color: u ? u.color : '#64748b',
-        sharingEnabled: u ? u.sharingEnabled === true : false,
-        online: [...sockets].some((s) => s.userId === id),
-      };
+      const name = u ? u.name : 'Unknown';
+      const sharingEnabled = u ? u.sharingEnabled === true : false;
+      const online = [...sockets].some((s) => s.userId === id);
+      // Members must be distinguishable at a glance: keep each person's own
+      // colour unless someone else in this circle has already claimed it.
+      let color = u && u.color ? u.color : '#64748b';
+      if (taken.has(color)) color = COLORS.find((alt) => !taken.has(alt)) || color;
+      taken.add(color);
+      return { id, name, color, sharingEnabled, online };
     }),
   };
 }
