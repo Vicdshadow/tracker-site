@@ -164,11 +164,88 @@ if (resetBtn) {
 
 /* ---------------------------------- map ---------------------------------- */
 
-function mapNotice(html) {
+function mapNotice(html, action) {
   const box = el('map-notice');
   if (!box) return;
-  box.innerHTML = html;
+  box.innerHTML = html || '';
   box.hidden = !html;
+  if (!html || !action) return;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn small-btn';
+  btn.textContent = action.label;
+  btn.style.marginTop = '10px';
+  btn.addEventListener('click', action.onClick);
+  box.appendChild(btn);
+}
+
+// Three free, keyless basemaps tried in order. Only the first one needs a
+// {r} retina token; the other two 404 on "@2x" paths.
+const BASEMAP_SOURCES = [
+  {
+    url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+    opts: {
+      subdomains: 'abcd',
+      maxZoom: 19,
+      attribution:
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+    },
+  },
+  {
+    url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    opts: {
+      maxZoom: 19,
+      attribution:
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    },
+  },
+  {
+    url: 'https://maps.wikimedia.org/osm-intl/{z}/{x}/{y}.png',
+    opts: {
+      maxZoom: 19,
+      attribution:
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; Wikimedia',
+    },
+  },
+];
+let basemapLayer = null;
+let basemapIndex = 0;
+let basemapErrors = 0;
+
+function loadBasemap() {
+  if (!map || typeof L === 'undefined') return;
+  if (basemapLayer) {
+    map.removeLayer(basemapLayer);
+    basemapLayer = null;
+  }
+  basemapErrors = 0;
+  const layer = L.tileLayer(BASEMAP_SOURCES[basemapIndex].url, BASEMAP_SOURCES[basemapIndex].opts);
+  layer.on('tileerror', () => {
+    basemapErrors += 1;
+    if (basemapErrors < 3) return;
+    if (basemapIndex < BASEMAP_SOURCES.length - 1) {
+      basemapIndex += 1;
+      loadBasemap();
+      return;
+    }
+    mapNotice(
+      '<strong>Map background unavailable</strong>' +
+        'The streets and terrain could not be downloaded, so the map stays blank. ' +
+        'Markers, trails and alerts still work. An ad-blocker, VPN or network filter is usually what blocks map images ' +
+        '&mdash; allow images for this site, then retry.',
+      {
+        label: 'Retry map',
+        onClick: () => {
+          basemapIndex = 0;
+          mapNotice('');
+          loadBasemap();
+        },
+      }
+    );
+  });
+  layer.on('load', () => mapNotice(''));
+  basemapLayer = layer;
+  layer.addTo(map);
 }
 
 function ensureMap() {
@@ -178,49 +255,7 @@ function ensureMap() {
     return null;
   }
   map = L.map('map').setView([20, 0], 2);
-
-  // Two keyless basemaps in a row: CARTO dark, then plain OpenStreetMap.
-  // If both are blocked (ad-blocker, offline, captive portal) say so instead
-  // of leaving an empty dark rectangle.
-  const sources = [
-    {
-      url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-      opts: {
-        subdomains: 'abcd',
-        maxZoom: 19,
-        attribution:
-          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-      },
-    },
-    {
-      url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-      opts: {
-        maxZoom: 19,
-        attribution:
-          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-      },
-    },
-  ];
-  let sourceIndex = 0;
-  let tileErrors = 0;
-  const layer = L.tileLayer(sources[0].url, sources[0].opts);
-  layer.on('tileerror', () => {
-    tileErrors += 1;
-    if (tileErrors < 3) return;
-    if (sourceIndex < sources.length - 1) {
-      sourceIndex += 1;
-      tileErrors = 0;
-      map.removeLayer(layer);
-      const next = L.tileLayer(sources[sourceIndex].url, sources[sourceIndex].opts);
-      next.on('tileerror', () => {
-        mapNotice('<strong>Map tiles are not loading</strong>Check your connection, or a browser extension may be blocking map tiles. No API key is needed for this map.');
-      });
-      next.addTo(map);
-      return;
-    }
-    mapNotice('<strong>Map tiles are not loading</strong>Check your connection, or a browser extension may be blocking map tiles. No API key is needed for this map.');
-  });
-  layer.addTo(map);
+  loadBasemap();
 
   syncMapSize();
   // Leaflet caches container dimensions, so a resize or orientation change

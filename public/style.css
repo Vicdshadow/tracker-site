@@ -159,6 +159,7 @@ input:focus-visible, button:focus-visible, select:focus-visible {
   display: flex;
   align-items: center;
   gap: 12px;
+  flex-wrap: wrap;
   padding: 10px 14px;
   background: var(--danger);
   color: #2b0710;
@@ -305,14 +306,18 @@ input:focus-visible, button:focus-visible, select:focus-visible {
 }
 .map-notice strong { display: block; margin-bottom: 4px; color: var(--accent); }
 
+/* Top-right: Leaflet puts its zoom control in the top-left corner, so our own
+   controls live on the opposite side instead of sitting on top of it. */
 .map-controls {
   position: absolute;
   top: 12px;
-  left: 12px;
+  right: 12px;
+  left: auto;
   z-index: 600;
   display: flex;
   gap: 7px;
   flex-wrap: wrap;
+  justify-content: flex-end;
   max-width: calc(100% - 24px);
 }
 
