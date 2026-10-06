@@ -173,6 +173,8 @@ function broadcast(userIds, type, payload, exceptSock) {
 function notifySharingChange(userId) {
   const u = getUser(userId);
   broadcast(watchersOf(userId), 'sharing', { user: publicUser(u) });
+  // watchersOf excludes the sharer, but their own member row needs the update.
+  broadcast(new Set([userId]), 'sharing', { user: publicUser(u) });
   pushViewers(userId);
 }
 
@@ -454,7 +456,10 @@ app.get('/api/me', auth, (req, res) => {
 
 app.patch('/api/me/sharing', auth, (req, res) => {
   const u = req.user;
-  if (typeof req.body.enabled === 'boolean') u.sharingEnabled = req.body.enabled;
+  // The frontend sends `sharingEnabled`; `enabled` is accepted for older clients.
+  const enabled =
+    typeof req.body.enabled === 'boolean' ? req.body.enabled : req.body.sharingEnabled;
+  if (typeof enabled === 'boolean') u.sharingEnabled = enabled;
   if (req.body.mode === 'network' || req.body.mode === 'gps') u.mode = req.body.mode;
 
   const valid = new Set(circlesOf(u.id).map((c) => c.id));
