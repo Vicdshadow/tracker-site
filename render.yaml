@@ -1,0 +1,32 @@
+# Backend for the tracker: the Express + WebSocket server in server.js.
+# Netlify only serves the static frontend (see netlify.toml), so this service
+# is what actually makes the site functional.
+#
+# Deploy: Render dashboard -> New -> Blueprint -> connect this GitHub repo.
+# Render picks up this file automatically and creates a free web service.
+#
+# Two environment variables are prompted for in the Render dashboard:
+#   UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN
+#     Optional but strongly recommended: without them the JSON database lives
+#     on Render's filesystem, which is wiped on every restart/redeploy/spin-down
+#     (accounts and trails would be lost). Create a free Redis database at
+#     console.upstash.com (no credit card) and paste its REST URL and token.
+#   CORS_ORIGINS is pre-set to '*' so the Netlify frontend can call the API.
+#     Tighten it to your Netlify origin later if you want.
+
+services:
+  - type: web
+    runtime: node
+    name: tracker-api
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_VERSION
+        value: '24'
+      - key: CORS_ORIGINS
+        value: '*'
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false

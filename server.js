@@ -495,12 +495,19 @@ app.post('/api/circles/:id/invite-link', auth, (req, res) => {
   if (PUBLIC_URL) {
     baseUrl = PUBLIC_URL;
   } else {
-    let host = req.get('host');
-    if (host.startsWith('localhost') || host.startsWith('127.0.0.1')) {
-      const port = host.split(':')[1] || '3000';
-      host = `${getLocalIp()}:${port}`;
+    // Prefer the origin the request came from so invite links point back at
+    // whichever frontend (Netlify, Render, localhost) generated them.
+    const origin = req.get('origin');
+    if (origin) {
+      baseUrl = origin;
+    } else {
+      let host = req.get('host');
+      if (host.startsWith('localhost') || host.startsWith('127.0.0.1')) {
+        const port = host.split(':')[1] || '3000';
+        host = `${getLocalIp()}:${port}`;
+      }
+      baseUrl = `${req.protocol}://${host}`;
     }
-    baseUrl = `${req.protocol}://${host}`;
   }
   res.json({ url: `${baseUrl}/?join=${code}`, code });
 });
@@ -675,9 +682,10 @@ server.listen(PORT, () => {
 });
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
-  process.on(sig, () => {
-    flush();
+  process.on(sig, async () => {
+    // Wait for the debounced db write (including the remote store) to land.
+    await flush();
     server.close(() => process.exit(0));
-    setTimeout(() => process.exit(0), 500).unref();
+    setTimeout(() => process.exit(0), 2000).unref();
   });
 }
