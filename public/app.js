@@ -1,6 +1,12 @@
 const el = (id) => document.getElementById(id);
 const TOKEN_KEY = 'beacon.token';
 const API_BASE_KEY = 'beacon.apiBase';
+const BEARING_KEY = 'beacon.bearing';
+const CIRCLE_KEY = 'beacon.circle';
+
+function rememberCircle(id) {
+  try { localStorage.setItem(CIRCLE_KEY, id); } catch { /* private mode */ }
+}
 
 // Empty means "same origin as this page". config.js wins on deploys; the
 // localStorage override is for pointing a local build at a remote backend.
@@ -36,6 +42,11 @@ const state = {
   pendingAlert: null,
   isLocal: false,
   wsStatus: 'connecting',
+  // Circles we have asked the server to stream (positions + trails).
+  subscribed: new Set(),
+  // Timestamp of the last time *you* dragged/zoomed the map, so the app
+  // stops yanking the view back while you are exploring.
+  lastUserGesture: 0,
 };
 
 let map = null;
@@ -281,8 +292,27 @@ function ensureMap() {
     mapNotice('<strong>Map failed to load</strong>The map library did not load. Press Ctrl+Shift+R to force a refresh.');
     return null;
   }
-  map = L.map('map').setView([20, 0], 2);
+  // rotate:true (leaflet-rotate) lets the map spin a full 360°; tiles turn
+  // while the pins stay upright. Drag the compass, shift+scroll, or pinch
+  // with two fingers on a phone.
+  map = L.map('map', {
+    rotate: true,
+    bearing: Number(localStorage.getItem(BEARING_KEY)) || 0,
+    rotateControl: { position: 'topleft', closeOnZeroBearing: false },
+    touchRotate: true,
+  }).setView([20, 0], 2);
+  if (typeof map.on === 'function') {
+    map.on('rotate', () => {
+      try { localStorage.setItem(BEARING_KEY, String(Math.round(map.getBearing()))); } catch { /* private mode */ }
+    });
+  }
   loadBasemap();
+
+  // Any interaction of yours pauses the automatic framing of the map.
+  const noteGesture = () => { state.lastUserGesture = Date.now(); };
+  map.on('dragstart movestart zoomstart', (e) => { if (e.originalEvent) noteGesture(); });
+  map.getContainer().addEventListener('pointerdown', noteGesture, { passive: true });
+  map.getContainer().addEventListener('wheel', noteGesture, { passive: true });
 
   syncMapSize();
   // Leaflet caches container dimensions, so a resize or orientation change
@@ -354,12 +384,32 @@ function popupHtml(userId, point) {
   return `<div>${rows.join('<br>')}</div>`;
 }
 
+function distanceM(a, b) {
+  const pa = L.latLng(a.lat, a.lon !== undefined ? a.lon : a.lng);
+  const pb = L.latLng(b.lat, b.lon !== undefined ? b.lon : b.lng);
+  return pa.distanceTo(pb);
+}
+
+// GPS and cell-tower fixes wobble by tens of metres even when you are standing
+// still, so a pin (and the trail behind it) only moves when the new fix is
+// plausibly a real step.
+function pinShouldMove(entry, next, point) {
+  const acc = Number(point.acc);
+  const jump = entry.target.distanceTo(next);
+  if (jump > Math.max(12, Number.isFinite(acc) ? acc * 0.8 : 0)) return true;
+  if (point.spd != null && point.spd > 0.6) return true;
+  if (Date.now() - (entry.lastMoved || 0) > 90000) return true;
+  return false;
+}
+
 function placeMarker(userId, point) {
   const m = ensureMap();
   if (!m) return null;
   const isMe = !!state.me && userId === state.me.id;
   const color = userColor(userId);
+  const next = L.latLng(point.lat, point.lon);
   let entry = state.markers.get(userId);
+  let moved = false;
 
   if (!entry) {
     const marker = L.marker([point.lat, point.lon], {
@@ -370,21 +420,53 @@ function placeMarker(userId, point) {
     entry = {
       marker,
       color,
-      target: L.latLng(point.lat, point.lon),
-      current: L.latLng(point.lat, point.lon),
+      target: next,
+      current: next,
+      lastMoved: Date.now(),
+      circle: null,
     };
     state.markers.set(userId, entry);
+    moved = true;
   } else {
-    entry.target = L.latLng(point.lat, point.lon);
+    moved = pinShouldMove(entry, next, point);
+    if (moved) {
+      entry.target = next;
+      entry.lastMoved = Date.now();
+    }
     if (entry.color !== color) {
       entry.color = color;
       entry.marker.setIcon(markerIcon(color, isMe));
     }
   }
 
+  // Accuracy ring: shows how fuzzy the fix is, which is what a bouncing pin
+  // really looks like when you are standing still.
+  const acc = Number(point.acc);
+  if (Number.isFinite(acc) && acc > 0 && acc < 10000) {
+    if (!entry.circle) {
+      entry.circle = L.circle([point.lat, point.lon], {
+        radius: acc,
+        color,
+        weight: 1,
+        opacity: 0.55,
+        fillColor: color,
+        fillOpacity: 0.12,
+        interactive: false,
+      }).addTo(m);
+    } else {
+      if (moved) entry.circle.setLatLng(next);
+      entry.circle.setRadius(acc);
+      entry.circle.setStyle({ color, fillColor: color });
+    }
+  } else if (entry.circle) {
+    entry.circle.remove();
+    entry.circle = null;
+  }
+
   entry.marker.setPopupContent(popupHtml(userId, point));
   if (!isMe) state.live.set(userId, point);
-  if (isMe && el('follow-select').value === 'me') {
+  const recentlyExplored = Date.now() - state.lastUserGesture < 30000;
+  if (isMe && el('follow-select').value === 'me' && !recentlyExplored) {
     // A cold start lands on a world-wide view; frame your own pin at street
     // level once, then only pan so pinching in/out still works.
     if (!followFramed) {
@@ -401,11 +483,13 @@ function placeMarker(userId, point) {
 let followFramed = false;
 
 let fitTimer = null;
-// Positions arrive one message at a time, so fit after the burst settles.
+// Positions arrive one message at a time, so fit after the burst settles —
+// but never while the user is exploring the map themselves.
 function scheduleFit() {
   if (fitTimer) clearTimeout(fitTimer);
   fitTimer = setTimeout(() => {
     fitTimer = null;
+    if (Date.now() - state.lastUserGesture < 30000) return;
     if (state.markers.size && el('follow-select').value !== 'me') fitMembers();
   }, 500);
 }
@@ -414,6 +498,7 @@ function removeMarker(userId) {
   const entry = state.markers.get(userId);
   if (entry) {
     entry.marker.remove();
+    if (entry.circle) entry.circle.remove();
     state.markers.delete(userId);
   }
   state.live.delete(userId);
@@ -441,6 +526,12 @@ function animateMarkers() {
 
 function pushPoint(userId, point) {
   const list = state.points.get(userId) || [];
+  const last = list[list.length - 1];
+  if (last) {
+    // Drop stationary wobble so the trail shows the route, not the jitter.
+    const threshold = Math.max(6, (Number(point.acc) || 0) * 0.6);
+    if (distanceM(last, point) < threshold && point.t - last.t < 120000) return;
+  }
   list.push({ t: point.t, lat: point.lat, lon: point.lon });
   state.points.set(userId, list);
   drawTrails();
@@ -495,13 +586,7 @@ el('trail-toggle').addEventListener('change', drawTrails);
 
 el('hours-select').addEventListener('change', () => {
   drawTrails();
-  if (state.ws && state.selectedCircle) {
-    state.ws.send(JSON.stringify({
-      type: 'subscribe',
-      circleId: state.selectedCircle,
-      hours: Number(el('hours-select').value),
-    }));
-  }
+  if (state.selectedCircle) subscribeCircle(state.selectedCircle);
 });
 
 el('follow-select').addEventListener('change', () => {
@@ -517,9 +602,12 @@ el('follow-select').addEventListener('change', () => {
   }
 });
 
-function fitMembers() {
+function fitMembers(force) {
   const m = ensureMap();
   if (!m) return;
+  // Someone dragging the map around has taken control: leave them alone until
+  // they press Fit all / Recenter, or 30s pass without a gesture.
+  if (force !== true && Date.now() - state.lastUserGesture < 30000) return;
   const points = [];
   for (const [userId, entry] of state.markers) {
     const me = state.me && userId === state.me.id;
@@ -533,7 +621,7 @@ function fitMembers() {
   if (points.length > 1) m.fitBounds(L.latLngBounds(points), { padding: [48, 48], maxZoom: 17 });
 }
 
-el('fit-members').addEventListener('click', fitMembers);
+el('fit-members').addEventListener('click', () => fitMembers(true));
 
 el('recenter').addEventListener('click', () => {
   const entry = state.me && state.markers.get(state.me.id);
@@ -544,6 +632,10 @@ el('recenter').addEventListener('click', () => {
 
 el('basemap-toggle').addEventListener('click', cycleBasemap);
 updateBasemapButton();
+
+el('reset-north').addEventListener('click', () => {
+  if (map && typeof map.setBearing === 'function') map.setBearing(0);
+});
 
 /* ------------------------------- geolocation ------------------------------ */
 
@@ -609,7 +701,7 @@ async function onFix(pos) {
   bits.push(state.mode === 'network' ? 'cell / WiFi' : 'GPS');
   setGpsState(bits.join(' · '));
 
-  pushPoint(state.me.id, { t: Date.now(), lat: latitude, lon: longitude });
+  pushPoint(state.me.id, { t: Date.now(), lat: latitude, lon: longitude, acc: accuracy, spd: speed });
   await postLocation(currentCoords());
 }
 
@@ -749,14 +841,23 @@ el('circle-form').addEventListener('submit', async (e) => {
 
 const currentCircle = () => state.circles.find((c) => c.id === state.selectedCircle) || state.circles[0] || null;
 
+// Ask the server to stream this circle's positions and trails. Safe to call
+// again at any time: it just replays the latest points.
+function subscribeCircle(circleId) {
+  if (!circleId || !state.ws || state.ws.readyState !== 1) return;
+  state.subscribed.add(circleId);
+  state.ws.send(JSON.stringify({
+    type: 'subscribe',
+    circleId,
+    hours: Number(el('hours-select').value),
+  }));
+}
+
 function selectCircle(id) {
   state.selectedCircle = id;
+  rememberCircle(id);
   if (state.ws && state.ws.readyState === 1) {
-    state.ws.send(JSON.stringify({
-      type: 'subscribe',
-      circleId: id,
-      hours: Number(el('hours-select').value),
-    }));
+    subscribeCircle(id);
     state.ws.send(JSON.stringify({ type: 'viewing', active: true, circleId: id }));
   }
   renderCircles();
@@ -869,6 +970,7 @@ async function handleJoinCode(code) {
       state.circles = state.circles.map((c) => (c.id === circle.id ? circle : c));
     }
     state.selectedCircle = circle.id;
+    rememberCircle(circle.id);
     renderCircles();
     renderMembers();
     renderSharing();
@@ -987,35 +1089,62 @@ function renderMembers() {
   }
 
   list.innerHTML = '';
+  const isOwner = !!state.me && circle.ownerId === state.me.id;
+  let hiddenCount = 0;
+
   for (const m of circle.members) {
-    const isMe = m.id === state.me.id;
+    const isMe = !!state.me && m.id === state.me.id;
     const live = state.live.get(m.id);
     const online = state.online.has(m.id);
+    // sharingHere is per-circle: a member can be broadcasting to a different
+    // circle and still be invisible here, which used to look like a bug.
+    const here = m.sharingHere !== false;
+    if (!isMe && !here) hiddenCount += 1;
+
+    const status = !m.sharingEnabled
+      ? 'Not sharing'
+      : !here
+        ? `Not sharing with this circle`
+        : online ? 'Sharing now' : 'Sharing · offline';
+
+    const canRemove = !isMe && isOwner;
+    const canLeave = isMe && !isOwner;
+    const actionTitle = canLeave ? 'Leave this circle' : `Remove ${m.name} from this circle`;
+
     const row = document.createElement('div');
     row.className = 'row';
     row.style.cursor = 'default';
-    const status = m.sharingEnabled
-      ? (online ? 'Sharing now' : 'Sharing · offline')
-      : 'Not sharing';
-    row.title = m.sharingEnabled ? '' : 'Turn sharing on on their device to see their position';
+    row.title = !m.sharingEnabled
+      ? 'Turn sharing on on their device to see their position'
+      : !here
+        ? `They are sharing with a different circle. On their phone: Sharing → Share with → ${circle.name}.`
+        : '';
     row.innerHTML = `
       <span class="dot" style="background:${userColor(m.id)}"></span>
       <span>${escapeHtml(m.name)}${isMe ? ' (you)' : ''}<span class="muted small block">${status}</span></span>
-      <span class="meta muted small">${live ? ago(live.t) : '—'}</span>`;
+      <span class="meta muted small">${live ? ago(live.t) : '—'}</span>
+      ${canRemove || canLeave ? `<button class="row-remove" type="button" title="${escapeHtml(actionTitle)}" aria-label="${escapeHtml(actionTitle)}">${canLeave ? 'Leave' : '&#10005;'}</button>` : ''}`;
+    const actionBtn = row.querySelector('.row-remove');
+    if (actionBtn) {
+      actionBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        removeMember(circle, m, isMe);
+      });
+    }
     list.appendChild(row);
   }
 
   // Silence on an empty map is the most confusing failure mode, so say why.
-  const noPositions = [...state.markers.keys()].filter((id) => {
-    const m = circle.members.find((x) => x.id === id);
-    return m && !m.sharingEnabled;
-  });
-  if (!state.markers.size || noPositions.length) {
-    const parts = [];
-    if (!state.markers.size) parts.push('No one in this circle is sharing a position yet.');
-    else if (noPositions.length) {
-      parts.push(`${noPositions.length} member(s) have sharing turned off, so their position is hidden.`);
-    }
+  const parts = [];
+  if (!state.markers.size) {
+    parts.push('Nobody is on the map yet — a member only gets a pin once they share their location with this circle.');
+  }
+  if (hiddenCount) {
+    parts.push(
+      `${hiddenCount} member${hiddenCount === 1 ? ' is' : 's are'} not sharing with this circle, so ${hiddenCount === 1 ? 'their' : 'their'} pin${hiddenCount === 1 ? '' : 's'} ${hiddenCount === 1 ? 'is' : 'are'} hidden. On their phone: Sharing → Share with → “${circle.name}”.`
+    );
+  }
+  if (parts.length) {
     const note = document.createElement('p');
     note.className = 'muted small';
     note.style.marginTop = '8px';
@@ -1024,12 +1153,57 @@ function renderMembers() {
   }
 }
 
+// Removing someone (or leaving yourself) is the owner's call, so both run
+// through the same endpoint with different expectations on the client.
+async function removeMember(circle, member, isMe) {
+  const question = isMe
+    ? `Leave "${circle.name}"? You will stop seeing its members.`
+    : `Remove ${member.name} from "${circle.name}"?`;
+  if (!window.confirm(question)) return;
+  try {
+    const { circle: updated } = await api(`/api/circles/${circle.id}/members/${member.id}`, { method: 'DELETE' });
+    if (isMe) {
+      state.circles = state.circles.filter((c) => c.id !== circle.id);
+      state.subscribed.delete(circle.id);
+      if (state.selectedCircle === circle.id) state.selectedCircle = state.circles[0]?.id || null;
+    } else {
+      state.circles = state.circles.map((c) => (c.id === updated.id ? updated : c));
+    }
+    // Anything that is no longer visible through any circle loses its pin.
+    for (const id of [...state.markers.keys()]) {
+      if (state.me && id === state.me.id) continue;
+      if (!stillVisible(id)) removeMarker(id);
+    }
+    renderCircles();
+    renderMembers();
+    renderSharing();
+    drawTrails();
+    toast(isMe ? `You left "${circle.name}".` : `${member.name} was removed from "${circle.name}".`);
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+// A marker survives only if the person is still visible through *some* circle.
+function stillVisible(userId) {
+  return state.circles.some((c) => {
+    const m = c.members.find((x) => x.id === userId);
+    return !!m && m.sharingHere !== false && m.sharingEnabled !== false;
+  });
+}
+
 // Location traffic is the most reliable signal that a member is actually
 // sharing, so keep the circle summaries in step with it.
-function markSharing(userId, on) {
+function markSharing(userId, on, shareCircles) {
   for (const c of state.circles) {
     const m = c.members.find((x) => x.id === userId);
-    if (m) m.sharingEnabled = on;
+    if (!m) continue;
+    m.sharingEnabled = on;
+    // Per-circle visibility. shareCircles comes from the server on a toggle;
+    // for a live fix we only know it applies to circles we are streaming.
+    if (!on) m.sharingHere = false;
+    else if (Array.isArray(shareCircles)) m.sharingHere = shareCircles.includes(c.id);
+    else if (m.sharingHere !== true) m.sharingHere = state.subscribed.has(c.id);
   }
 }
 
@@ -1120,7 +1294,14 @@ function connectWs() {
         state.me = msg.me;
         state.circles = msg.circles;
         state.online = new Set();
-        if (!state.selectedCircle && state.circles.length) state.selectedCircle = state.circles[0].id;
+        // Reopen the circle you were last looking at. Falling back to circles[0]
+        // landed people on their own empty "Family" circle, which looked like
+        // nobody they invited existed.
+        if (!state.selectedCircle && state.circles.length) {
+          const stored = state.circles.find((c) => c.id === localStorage.getItem(CIRCLE_KEY));
+          const withOthers = state.circles.find((c) => c.members.length > 1);
+          state.selectedCircle = (stored || withOthers || state.circles[0]).id;
+        }
         for (const p of msg.live) placeMarker(p.userId, p);
         renderCircles();
         renderMembers();
@@ -1157,8 +1338,11 @@ case 'location': {
       }
 
 case 'sharing': {
-          markSharing(msg.user.id, msg.user.sharingEnabled);
+          markSharing(msg.user.id, msg.user.sharingEnabled, msg.user.shareCircles);
           if (!msg.user.sharingEnabled) removeMarker(msg.user.id);
+          // Someone started broadcasting: pull their last position straight
+          // away instead of waiting for their next fix.
+          else if (state.selectedCircle) subscribeCircle(state.selectedCircle);
           renderMembers();
           break;
         }
@@ -1175,6 +1359,9 @@ case 'sharing': {
         renderMembers();
         renderSharing();
         refreshColors();
+        // Membership or sharing scope changed: replay this circle's latest
+        // positions so new/removed members show up without waiting.
+        subscribeCircle(msg.circle.id);
         break;
       }
 

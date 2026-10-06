@@ -254,7 +254,6 @@ wss.on('connection', (ws, req) => {
       const since = now() - hours * 3600 * 1000;
       for (const memberId of circle.memberIds) {
         if (!sharedCircleIds(memberId).has(circle.id)) continue;
-        if (memberId === user.id) continue;
         const pts = (db.trails[memberId] || []).filter((p) => p.t >= since);
         if (pts.length) send(sock, 'trail', { userId: memberId, points: pts });
       }
@@ -320,7 +319,16 @@ function circleSummary(c) {
       let color = u && u.color ? u.color : '#64748b';
       if (taken.has(color)) color = COLORS.find((alt) => !taken.has(alt)) || color;
       taken.add(color);
-      return { id, name, color, sharingEnabled, online };
+      return {
+        id,
+        name,
+        color,
+        sharingEnabled,
+        // sharingEnabled is global; this is whether *this circle* can see them,
+        // which is what decides if a pin shows up on the map.
+        sharingHere: sharedCircleIds(id).has(c.id),
+        online,
+      };
     }),
   };
 }
@@ -535,8 +543,12 @@ app.get('/api/join/:code', auth, (req, res) => {
   if (!circle) return res.status(404).json({ error: 'Circle no longer exists' });
   if (!circle.memberIds.includes(req.user.id)) {
     circle.memberIds.push(req.user.id);
+    // Joining a circle is the consent: make sure the joiner's position is
+    // visible there instead of silently staying in their original circle only.
+    if (!req.user.shareCircles.includes(circle.id)) req.user.shareCircles.push(circle.id);
     save();
     broadcast(new Set(circle.memberIds), 'circle-updated', { circle: circleSummary(circle) });
+    notifySharingChange(req.user.id);
   }
   res.json({ circle: circleSummary(circle) });
 });
@@ -551,6 +563,12 @@ app.post('/api/circles/:id/members', auth, (req, res) => {
   if (!target) return res.status(404).json({ error: 'No account with that email' });
   if (!circle.memberIds.includes(target.id)) {
     circle.memberIds.push(target.id);
+    // Someone already broadcasting should show up in the circle they were
+    // just invited to; otherwise they stay invisible until they tick a box.
+    if (target.sharingEnabled === true && !target.shareCircles.includes(circle.id)) {
+      target.shareCircles.push(circle.id);
+      notifySharingChange(target.id);
+    }
     save();
   }
   broadcast(new Set(circle.memberIds), 'circle-updated', { circle: circleSummary(circle) });
@@ -559,11 +577,29 @@ app.post('/api/circles/:id/members', auth, (req, res) => {
 
 app.delete('/api/circles/:id/members/:userId', auth, (req, res) => {
   const circle = circleById(req.params.id);
+  if (!circle) return res.status(404).json({ error: 'Circle not found' });
   if (!isMember(circle, req.user.id)) return res.status(404).json({ error: 'Circle not found' });
-  circle.memberIds = circle.memberIds.filter((m) => m !== req.params.userId);
+
+  const memberId = req.params.userId;
+  const leavingSelf = memberId === req.user.id;
+  if (!circle.memberIds.includes(memberId)) return res.status(404).json({ error: 'That person is not in this circle' });
+  if (memberId === circle.ownerId) return res.status(400).json({ error: 'The circle owner cannot be removed' });
+  if (!leavingSelf && circle.ownerId !== req.user.id) {
+    return res.status(403).json({ error: 'Only the circle owner can remove people' });
+  }
+
+  circle.memberIds = circle.memberIds.filter((m) => m !== memberId);
+  const removed = getUser(memberId);
+  if (removed) {
+    removed.shareCircles = (removed.shareCircles || []).filter((cid) => cid !== circle.id);
+    save();
+    notifySharingChange(removed.id);
+  }
   save();
   broadcast(new Set(circle.memberIds), 'circle-updated', { circle: circleSummary(circle) });
-  res.json({ circle: circleSummary(circle) });
+  // The person who left or was dropped needs the circle gone from their list.
+  for (const s of sockets) if (s.userId === memberId) send(s, 'circle-removed', { circleId: circle.id });
+  res.json({ circle: circleSummary(circle), removedId: memberId, left: leavingSelf });
 });
 
 app.delete('/api/circles/:id', auth, (req, res) => {
